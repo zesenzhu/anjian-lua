@@ -1,0 +1,411 @@
+' =========================================================================
+' @file: xb_logger.mq
+' @description: 按键精灵手机版 TCP 日志上报命令库 (符合 Nest.js tcp-socket 服务规范)
+' @author: Antigravity AI
+' @date: 2026-06-09
+' =========================================================================
+
+Import "cjson.lua"
+Import "socket.lua"
+
+Function Init(ip, port, code, deviceId, appName)
+    Call Thread.SetShareVar("xb_logger_ip", ip)
+    Call Thread.SetShareVar("xb_logger_port", port)
+    Call Thread.SetShareVar("xb_logger_code", code)
+    Call Thread.SetShareVar("xb_logger_device_id", deviceId)
+    Call Thread.SetShareVar("xb_logger_app_name", appName)
+    
+    Call Thread.SetShareVar("xb_logger_write_idx", 0)
+    Call Thread.SetShareVar("xb_logger_read_idx", 0)
+    Call Thread.SetShareVar("xb_logger_status", "initialized")
+    Call Thread.SetShareVar("xb_logger_is_streaming", 0)
+    Call Thread.SetShareVar("xb_logger_force_exit", 0)
+    
+    TracePrint "Nest TCP 日志插件初始化完毕"
+End Function
+
+Sub __push_log(level, module_name, content)
+    Dim status, time_str, timestamp, log_json, write_idx, safe_content, safe_module
+
+    status = Thread.GetShareVar("xb_logger_status")
+    If status = "uninitialized" Or status = Null Then
+        Exit Sub
+    End If
+    
+    time_str = DateTime.Format("%X")
+    timestamp = TickCount()
+    
+    ' 使用 Chr(92) 代表反斜杠，Chr(34) 代表双引号，彻底解决按键精灵编译器对反斜杠和双引号的词法转义报错 Bug
+    safe_content = Replace(content, Chr(92), Chr(92) & Chr(92))
+    safe_content = Replace(safe_content, Chr(34), Chr(92) & Chr(34))
+    safe_content = Replace(safe_content, Chr(10), Chr(92) & "n")
+    safe_content = Replace(safe_content, Chr(13), Chr(92) & "r")
+    
+    safe_module = Replace(module_name, Chr(92), Chr(92) & Chr(92))
+    safe_module = Replace(safe_module, Chr(34), Chr(92) & Chr(34))
+    
+    ' 纯字符串拼接，使用 Chr(34) 拼接 JSON 键值对，彻底规避三连双引号和反斜杠在 Q 语言编译阶段的错误
+    log_json = "{" & Chr(34) & "level" & Chr(34) & ":" & Chr(34) & level & Chr(34) & "," & Chr(34) & "module" & Chr(34) & ":" & Chr(34) & safe_module & Chr(34) & "," & Chr(34) & "content" & Chr(34) & ":" & Chr(34) & safe_content & Chr(34) & "," & Chr(34) & "time" & Chr(34) & ":" & Chr(34) & time_str & Chr(34) & "," & Chr(34) & "timestamp" & Chr(34) & ":" & timestamp & "}"
+    
+    write_idx = Thread.GetShareVar("xb_logger_write_idx")
+    If write_idx = Null Then
+        write_idx = 0
+    End If
+    write_idx = write_idx + 1
+    
+    Call Thread.SetShareVar("xb_logger_item_" & write_idx, log_json)
+    Call Thread.SetShareVar("xb_logger_write_idx", write_idx)
+End Sub
+
+Function Info(module_name, content)
+    Call __push_log("INFO", module_name, content)
+End Function
+
+Function Warn(module_name, content)
+    Call __push_log("WARN", module_name, content)
+End Function
+
+Function Error(module_name, content)
+    Call __push_log("ERROR", module_name, content)
+End Function
+
+Function Close()
+    Call Thread.SetShareVar("xb_logger_force_exit", 1)
+End Function
+
+Sub ThreadWorker()
+    Import "socket.lua"
+    Import "cjson.lua"
+    
+    Dim ip, port, code, device_id, app_name, local_read_idx, pending_archive_str, pending_count
+    Dim last_archive_time, is_streaming, last_ping_time, current_status, force_exit, connect_ok
+    Dim auth_str, auth_resp, auth_tbl, errMsg, i, connection_healthy, now_tick
+    Dim ping_str, server_msg, lines, line, cmd_tbl, cmd, kickMsg
+    Dim write_idx, chunk_count, next_idx, log_item_str, chunk_logs_str, exit_send_str, archive_resp
+    Dim auth_status, lines_count, wait_i, wait_j
+    
+    ' 声明本地 socket 句柄变量，用于无状态连接，彻底规避跨线程局部句柄变量丢失的 Bug
+    Dim socket_handle
+    socket_handle = Null
+    
+    ip = Thread.GetShareVar("xb_logger_ip")
+    port = Thread.GetShareVar("xb_logger_port")
+    code = Thread.GetShareVar("xb_logger_code")
+    device_id = Thread.GetShareVar("xb_logger_device_id")
+    app_name = Thread.GetShareVar("xb_logger_app_name")
+    
+    If code = "" Or code = Null Or device_id = "" Or device_id = Null Then
+        TracePrint "Nest TCP 守护线程启动失败: 注册码或设备ID缺失"
+        Call Thread.SetShareVar("xb_logger_status", "error_config")
+        Exit Sub
+    End If
+    
+    TracePrint "Nest TCP 守护线程已拉起，准备接入连接..."
+    
+    local_read_idx = 0
+    pending_archive_str = ""
+    pending_count = 0
+    last_archive_time = TickCount()
+    is_streaming = false
+    last_ping_time = TickCount()
+    
+    Do
+        force_exit = Thread.GetShareVar("xb_logger_force_exit")
+        If force_exit = 1 Then
+            TracePrint "Nest TCP 接收到主线程退出信号，准备发送归档日志..."
+            Exit Do
+        End If
+        
+        current_status = Thread.GetShareVar("xb_logger_status")
+        If current_status = "kicked" Or current_status = "closed" Then
+            Exit Do
+        End If
+        
+        ' 状态机：物理连接与握手
+        If current_status <> "authorized" Then
+            Call Thread.SetShareVar("xb_logger_status", "connecting")
+            TracePrint "Nest TCP 正在尝试建立连接到: " & ip & ":" & port
+            
+            ' 调用无状态 TcpConnect 获取连接句柄
+            socket_handle = socket.TcpConnect(ip, CInt(port))
+            If socket_handle <> Null And socket_handle <> false And socket_handle <> 0 Then
+                TracePrint "Nest TCP 物理连接建立成功，正在进行鉴权握手..."
+                Delay 500
+                
+                ' 防御性 Null 检查，防止拼接变量为 Null 导致整个 JSON 字符串失效为 Null
+                If code = Null Or code = "" Then
+                    code = "UNKNOWN_CODE"
+                End If
+                If device_id = Null Or device_id = "" Then
+                    device_id = "UNKNOWN_DEVICE"
+                End If
+                If app_name = Null Or app_name = "" Then
+                    app_name = "UNKNOWN_APP"
+                End If
+                
+                ' 直接拼接 JSON 鉴权数据包
+                auth_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "auth" & Chr(34) & "," & Chr(34) & "code" & Chr(34) & ":" & Chr(34) & code & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "appName" & Chr(34) & ":" & Chr(34) & app_name & Chr(34) & "}" & Chr(10)
+                
+                TracePrint "【调试】Nest TCP 准备发送鉴权数据包: " & auth_str
+                
+                Dim send_ret
+                send_ret = socket.TcpSend(socket_handle, auth_str)
+                TracePrint "【调试】TcpSend 返回值: " & CStr(send_ret)
+                
+                If send_ret = Null Or send_ret = false Then
+                    TracePrint "【调试】TcpSend 失败，调用 GetLastError 获取原因: " & CStr(socket.GetLastError())
+                End If
+                
+                If send_ret Then
+                    TracePrint "【调试】开始轮询接收鉴权结果..."
+                    
+                    auth_resp = Null
+                    For wait_i = 1 To 30 ' 最多等待 3 秒 (30 * 100ms)
+                        auth_resp = socket.TcpReceive(socket_handle, "*a", 0)
+                        If auth_resp <> "" And auth_resp <> Null Then
+                            Exit For
+                        End If
+                        Delay 100
+                    Next
+ 
+                    TracePrint "【调试】TcpReceive 返回值: " & CStr(auth_resp)
+                    
+                    If auth_resp <> "" And auth_resp <> Null Then
+                        ' 将读取到的全部数据以换行符分割，防止多个包（鉴权响应+下行指令）粘包导致 JSON 解析崩溃
+                        Dim auth_lines, auth_lines_count, auth_line_i, auth_line, first_line_tbl, cmd_line_tbl
+                        auth_lines = Split(auth_resp, Chr(10))
+                        auth_lines_count = UBound(auth_lines)
+                        first_line_tbl = Null
+                        
+                        For auth_line_i = 0 To auth_lines_count
+                            auth_line = auth_lines(auth_line_i)
+                            If auth_line <> "" Then
+                                If first_line_tbl = Null Then
+                                    ' 第一行是非空的鉴权结果包
+                                    first_line_tbl = Cjson.Decode(auth_line)
+                                Else
+                                    ' 后面的是连带发送过来的下行指令（例如 start_log_stream）
+                                    cmd_line_tbl = Cjson.Decode(auth_line)
+                                    If cmd_line_tbl <> Null Then
+                                        cmd = cmd_line_tbl["cmd"]
+                                        If cmd = "start_log_stream" then
+                                            is_streaming = true
+                                            Call Thread.SetShareVar("xb_logger_is_streaming", 1)
+                                            TracePrint "Nest 实时指令：开启实时日志流上报"
+                                        End If
+                                    End If
+                                End If
+                            End If
+                        Next
+                        
+                        auth_tbl = first_line_tbl
+                        If auth_tbl <> Null And auth_tbl["status"] = "ok" Then
+                            Call Thread.SetShareVar("xb_logger_status", "authorized")
+                            last_ping_time = TickCount()
+                            TracePrint "Nest TCP 鉴权激活成功，开启守护循环！"
+                        Else
+                            errMsg = "未知原因"
+                            If auth_tbl <> Null Then
+                                errMsg = auth_tbl["message"]
+                            End If
+                            TracePrint "Nest TCP 鉴权失败: " & errMsg
+                            Call socket.TcpClose(socket_handle)
+                            socket_handle = Null
+                            Call Thread.SetShareVar("xb_logger_status", "auth_failed")
+                            Exit Do
+                        End If
+                    Else
+                        TracePrint "Nest TCP 鉴权超时，物理连接断开"
+                        Call socket.TcpClose(socket_handle)
+                        socket_handle = Null
+                        Call Thread.SetShareVar("xb_logger_status", "disconnected")
+                    End If
+                Else
+                    TracePrint "Nest TCP 鉴权发送失败，物理连接断开"
+                    Call socket.TcpClose(socket_handle)
+                    socket_handle = Null
+                    Call Thread.SetShareVar("xb_logger_status", "disconnected")
+                End If
+            Else
+                TracePrint "Nest TCP 物理连接失败，错误详情: " & CStr(socket.GetLastError())
+                Call Thread.SetShareVar("xb_logger_status", "disconnected")
+            End If
+            
+            ' 如果最终没有成功建立已授权状态，则进行冷却退避等待 10 秒，防止高频无延时死循环打爆连接或端口
+            auth_status = Thread.GetShareVar("xb_logger_status")
+            If auth_status <> "authorized" And auth_status <> "auth_failed" Then
+                TracePrint "TCP 连接尝试未成功，将在 10 秒后重试..."
+                For i = 1 To 100
+                    force_exit = Thread.GetShareVar("xb_logger_force_exit")
+                    If force_exit = 1 Then
+                        Exit For
+                    End If
+                    Delay 100
+                Next
+            End If
+        End If
+        
+        ' 数据交互阶段
+        auth_status = Thread.GetShareVar("xb_logger_status")
+        If auth_status = "authorized" And socket_handle <> Null And socket_handle <> false Then
+            connection_healthy = true
+            now_tick = TickCount()
+            
+            ' 1. 心跳维护 (每 30 秒发送一次 ping)
+            If now_tick - last_ping_time >= 30000 Then
+                ping_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "ping" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "}" & Chr(10)
+                If Not (socket.TcpSend(socket_handle, ping_str)) Then
+                    connection_healthy = false
+                Else
+                    last_ping_time = now_tick
+                End If
+            End If
+            ' 2. 接收服务器下行指令 (超时设为 0 秒进行非阻塞轮询，有数据即返，无数据不等待直接返回，保障 0 延迟)
+            If connection_healthy Then
+                server_msg = socket.TcpReceive(socket_handle, "*a", 0)
+                If server_msg <> "" And server_msg <> Null Then
+                    ' 解析可能的多行指令
+                    lines = Split(server_msg, Chr(10))
+                    lines_count = UBound(lines)
+                    For i = 0 To lines_count
+                        line = lines(i)
+                        If line <> "" Then
+                            ' 读取解析后的指令，使用方括号 []
+                            cmd_tbl = Cjson.Decode(line)
+                            If cmd_tbl <> Null Then
+                                cmd = cmd_tbl["cmd"]
+                                If cmd = "start_log_stream" then
+                                    is_streaming = true
+                                    Call Thread.SetShareVar("xb_logger_is_streaming", 1)
+                                    TracePrint "Nest 实时指令：开启实时日志流上报"
+                                ElseIf cmd = "stop_log_stream" then
+                                    is_streaming = false
+                                    Call Thread.SetShareVar("xb_logger_is_streaming", 0)
+                                    TracePrint "Nest 实时指令：关闭实时流，日志写入本地归档缓存"
+                                ElseIf cmd = "force_kick" then
+                                    kickMsg = cmd_tbl["message"]
+                                    If kickMsg = Null Then
+                                        kickMsg = "设备已在后台解绑"
+                                    End If
+                                    TracePrint "Nest 强制下线: " & kickMsg
+                                    Call socket.TcpClose(socket_handle)
+                                    socket_handle = Null
+                                    Call Thread.SetShareVar("xb_logger_status", "kicked")
+                                    Exit Sub
+                                End If
+                            End If
+                        End If
+                    Next
+                End If
+            End If
+            
+            ' 3. 消费日志队列
+            If connection_healthy Then
+                write_idx = Thread.GetShareVar("xb_logger_write_idx")
+                If write_idx = Null Then
+                    write_idx = 0
+                End If
+                
+                chunk_count = 0
+                chunk_logs_str = ""
+                
+                Do While local_read_idx < write_idx
+                    next_idx = local_read_idx + 1
+                    log_item_str = Thread.GetShareVar("xb_logger_item_" & next_idx)
+                    If log_item_str <> "" And log_item_str <> Null Then
+                        chunk_count = chunk_count + 1
+                        
+                        If chunk_logs_str <> "" then
+                            chunk_logs_str = chunk_logs_str & ","
+                        End If
+                        chunk_logs_str = chunk_logs_str & log_item_str
+                        
+                        pending_count = pending_count + 1
+                        If pending_archive_str <> "" then
+                            pending_archive_str = pending_archive_str & ","
+                        End If
+                        pending_archive_str = pending_archive_str & log_item_str
+                        
+                        Call Thread.SetShareVar("xb_logger_item_" & next_idx, "")
+                        local_read_idx = next_idx
+                        Call Thread.SetShareVar("xb_logger_read_idx", local_read_idx)
+                    Else
+                        Exit Do
+                    End If
+                Loop
+                
+                ' A. 实时流推送
+                If is_streaming And chunk_count > 0 Then
+                    Dim chunk_send_str
+                    chunk_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "log_chunk" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[" & chunk_logs_str & "]}" & Chr(10)
+                    If Not (socket.TcpSend(socket_handle, chunk_send_str)) Then
+                        connection_healthy = false
+                    End If
+                End If
+                
+                ' B. 批量持久化归档 (积攒 20 条或 30 秒)
+                If connection_healthy And pending_count > 0 Then
+                    If pending_count >= 20 Or (TickCount() - last_archive_time >= 30000) Then
+                        TracePrint "正在触发定时批量落库，日志条数: " & pending_count
+                        
+                        exit_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "exit_log" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[" & pending_archive_str & "]}" & Chr(10)
+                        
+                        If socket.TcpSend(socket_handle, exit_send_str) Then
+                            archive_resp = Null
+                            For wait_j = 1 To 30 ' 最多等待 3 秒
+                                archive_resp = socket.TcpReceive(socket_handle, "*a", 0)
+                                If archive_resp <> "" And archive_resp <> Null Then
+                                    Exit For
+                                End If
+                                Delay 100
+                            Next
+                            If archive_resp <> "" And archive_resp <> Null And InStr(1, archive_resp, "Exit logs archived successfully") > 0 then
+                                pending_archive_str = ""
+                                pending_count = 0
+                                last_archive_time = TickCount()
+                                TracePrint "批量落库数据库持久化完成，清空本地内存队列。"
+                            Else
+                                TracePrint "批量落库未收到成功响应或异常，保留缓存等待下一次尝试"
+                                If archive_resp = "" Or archive_resp = Null Then
+                                    connection_healthy = false
+                                End If
+                            End If
+                        Else
+                            connection_healthy = false
+                        End If
+                    End If
+                End If
+            End If
+            
+            ' 连接异常重置
+            If Not (connection_healthy) Then
+                TracePrint "检测到 Socket 连接已断开，关闭连接句柄并切换至 disconnected 状态"
+                Call socket.TcpClose(socket_handle)
+                socket_handle = Null
+                Call Thread.SetShareVar("xb_logger_status", "disconnected")
+            End If
+        End If
+        
+        Delay 100
+    Loop
+    
+    ' 退出前最后一次强制归档上传
+    If pending_count > 0 Then
+        current_status = Thread.GetShareVar("xb_logger_status")
+        If current_status = "authorized" And socket_handle <> Null And socket_handle <> false Then
+            TracePrint "正在上传最终残留归档日志，条数: " & pending_count
+            exit_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "exit_log" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[" & pending_archive_str & "]}" & Chr(10)
+            Call socket.TcpSend(socket_handle, exit_send_str)
+            Delay 250
+        Else
+            TracePrint "网络状态异常，本地未上传的最终归档日志已被丢弃，条数: " & pending_count
+        End If
+    End If
+    
+    If socket_handle <> Null And socket_handle <> false And socket_handle <> 0 Then
+        Call socket.TcpClose(socket_handle)
+        socket_handle = Null
+    End If
+    Call Thread.SetShareVar("xb_logger_status", "closed")
+    TracePrint "Nest TCP 守护线程已安全切断并退出。"
+End Sub
