@@ -14,6 +14,7 @@ Function Init(ip, port, code, deviceId, appName)
     Call Thread.SetShareVar("xb_logger_code", code)
     Call Thread.SetShareVar("xb_logger_device_id", deviceId)
     Call Thread.SetShareVar("xb_logger_app_name", appName)
+    Call Thread.SetShareVar("xb_logger_device_info", "{}")
     
     Call Thread.SetShareVar("xb_logger_write_idx", 0)
     Call Thread.SetShareVar("xb_logger_read_idx", 0)
@@ -23,6 +24,14 @@ Function Init(ip, port, code, deviceId, appName)
     
     TracePrint "Nest TCP 日志插件初始化完毕"
 End Function
+
+Function InitEx(ip, port, code, deviceId, appName, deviceInfoJson)
+    Call Init(ip, port, code, deviceId, appName)
+    If deviceInfoJson <> "" And deviceInfoJson <> Null Then
+        Call Thread.SetShareVar("xb_logger_device_info", deviceInfoJson)
+    End If
+End Function
+
 
 Sub __push_log(level, module_name, content)
     Dim status, time_str, timestamp, log_json, write_idx, safe_content, safe_module
@@ -143,8 +152,14 @@ Sub ThreadWorker()
                     app_name = "UNKNOWN_APP"
                 End If
                 
-                ' 直接拼接 JSON 鉴权数据包
-                auth_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "auth" & Chr(34) & "," & Chr(34) & "code" & Chr(34) & ":" & Chr(34) & code & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "appName" & Chr(34) & ":" & Chr(34) & app_name & Chr(34) & "}" & Chr(10)
+                ' 直接拼接 JSON 鉴权数据包，包含 deviceInfo
+                Dim dev_info
+                dev_info = Thread.GetShareVar("xb_logger_device_info")
+                If dev_info = "" Or dev_info = Null Then
+                    dev_info = "{}"
+                End If
+                auth_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "auth" & Chr(34) & "," & Chr(34) & "code" & Chr(34) & ":" & Chr(34) & code & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "appName" & Chr(34) & ":" & Chr(34) & app_name & Chr(34) & "," & Chr(34) & "deviceInfo" & Chr(34) & ":" & dev_info & "}" & Chr(10)
+
                 
                 TracePrint "【调试】Nest TCP 准备发送鉴权数据包: " & auth_str
                 
@@ -253,7 +268,14 @@ Sub ThreadWorker()
             
             ' 1. 心跳维护 (每 30 秒发送一次 ping)
             If now_tick - last_ping_time >= 30000 Then
-                ping_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "ping" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "}" & Chr(10)
+                Dim current_battery
+                current_battery = 100
+                On Error Resume Next
+                current_battery = Sys.GetBatteryLevel()
+                If current_battery = "" Or current_battery = Null Then
+                    current_battery = 100
+                End If
+                ping_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "ping" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "battery" & Chr(34) & ":" & current_battery & "}" & Chr(10)
                 If Not (socket.TcpSend(socket_handle, ping_str)) Then
                     connection_healthy = false
                 Else

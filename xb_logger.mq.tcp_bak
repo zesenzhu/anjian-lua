@@ -1,0 +1,81 @@
+ ' =========================================================================
+ ' @file: xb_logger.mq
+ ' @description: 按键精灵手机版 TCP 日志上报命令库 (符合 Nest.js tcp-socket 服务规范)
+ ' @author: Antigravity AI
+ ' @date: 2026-06-09
+ ' =========================================================================
+ 
+ Import "cjson.lua"
+ Import "socket.luae"
+ 
+ Function Init(ip, port, code, deviceId, appName)
+     Call Thread.SetShareVar("xb_logger_ip", ip)
+     Call Thread.SetShareVar("xb_logger_port", port)
+     Call Thread.SetShareVar("xb_logger_code", code)
+     Call Thread.SetShareVar("xb_logger_device_id", deviceId)
+     Call Thread.SetShareVar("xb_logger_app_name", appName)
+     
+     Call Thread.SetShareVar("xb_logger_write_idx", 0)
+     Call Thread.SetShareVar("xb_logger_read_idx", 0)
+     Call Thread.SetShareVar("xb_logger_status", "initialized")
+     Call Thread.SetShareVar("xb_logger_is_streaming", 0)
+     Call Thread.SetShareVar("xb_logger_force_exit", 0)
+     
+     TracePrint "Nest TCP 日志插件初始化完毕"
+ End Function
+ 
+ Sub __push_log(level, module_name, content)
+     ' 在函数开头统一进行 Dim 变量声明
+     Dim status, time_str, timestamp, log_item, log_json, write_idx
+ 
+     status = Thread.GetShareVar("xb_logger_status")
+     If status = "uninitialized" Or status = Null Then
+         Exit Sub
+     End If
+     
+     ' 构造日志 Table 结构
+     time_str = DateTime.Format("%X")
+     timestamp = T
+                                 If archive_resp = "" Or archive_resp = Null Then
+                                     connection_healthy = false
+                                 End If
+                             End If
+                         Else
+                             connection_healthy = false
+                         End If
+                     End If
+                 End If
+             End If
+             
+             ' 连接异常重置
+             If Not (connection_healthy) Then
+                 TracePrint "检测到 Socket 连接已断开，关闭连接句柄并切换至 disconnected 状态"
+                 Call socket.ClientClose()
+                 Call Thread.SetShareVar("xb_logger_status", "disconnected")
+             End If
+         End If
+         
+         Delay 100
+     Loop
+     
+     ' 退出前最后一次强制归档上传
+     If pending_count > 0 Then
+         current_status = Thread.GetShareVar("xb_logger_status")
+         If current_status = "authorized" Then
+             TracePrint "正在上传最终残留归档日志，条数: " & pending_count
+             final_payload = Cjson.Decode("{}")
+             final_payload("action") = "exit_log"
+             final_payload("deviceId") = device_id
+             final_payload("logs") = pending_archive
+             Call socket.ClientSend(Cjson.Encode(final_payload) & Chr(10))
+             Delay 250
+         Else
+             TracePrint "网络状态异常，本地未上传的最终归档日志已被丢弃，条数: " & pending_count
+         End If
+     End If
+     
+     Call socket.ClientClose()
+     Call Thread.SetShareVar("xb_logger_status", "closed")
+     TracePrint "Nest TCP 守护线程已安全切断并退出。"
+ End Sub
+ 

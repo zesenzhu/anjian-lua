@@ -1,0 +1,132 @@
+' =========================================================================
+' @file: xb_device.mq
+' @description: 跨平台 (Android/iOS) 设备唯一指纹及授权码绑定模块
+' @author: Antigravity AI
+' @date: 2026-06-09
+' =========================================================================
+
+' 获取或生成设备唯一指纹 (跨 Android/iOS 卸载重装也能认出)
+' @return {String} 唯一设备标识符
+Function GetUniqueDeviceID()
+    Dim official_id, backup_id, os_type, backup_path, backup_dir
+    
+    ' 1. 获取按键精灵内置的设备唯一 ID
+    official_id = GetDeviceID()
+    
+    ' 如果 official_id 获取失败，使用 UNKNOWN_DEVICE 兜底
+    If official_id = "" Or official_id = Null Then
+        official_id = "UNKNOWN_DEVICE"
+    End If
+    
+    ' 2. 获取当前操作系统类型 ("android" 或 "ios")
+    os_type = GetOSType()
+    
+    ' 3. 针对不同系统执行多重备份，以防卸载重装后 ID 改变
+    If os_type = "android" Then
+        ' Android 平台：将指纹备份写入外部公共 SD 卡路径 (重装按键精灵不影响外部 SD 卡)
+        backup_dir = "/sdcard/Android/media/.xb_secure"
+        backup_path = backup_dir & "/uuid.txt"
+        
+        ' 尝试从备份中读取
+        backup_id = ReadBackupFile(backup_path)
+        
+        If backup_id <> "" And backup_id <> Null Then
+            ' 备份存在，使用备份的 ID (确保即使设备 ID 变了也和以前相同)
+            GetUniqueDeviceID = backup_id
+            Exit Function
+        Else
+            ' 备份不存在，将当前获取的 ID 写入备份中，方便下次找回
+            Call WriteBackupFile(backup_path, official_id)
+            GetUniqueDeviceID = official_id
+            Exit Function
+        End If
+        
+    ElseIf os_type = "ios" Then
+        ' iOS 平台：如果是越狱系统，可将指纹备份写入全局路径，重装后依然存在
+        ' 如果是非越狱环境，则写入会静默失败，此时 GetDeviceID 靠按键精灵底层的 Keychain 存储来实现重装不丢失
+        backup_dir = "/var/mobile/Library/Preferences/.xb_secure"
+        backup_path = backup_dir & "/uuid.txt"
+        
+        ' 尝试从越狱全局路径中读取
+        backup_id = ReadBackupFile(backup_path)
+        
+        If backup_id <> "" And backup_id <> Null Then
+            GetUniqueDeviceID = backup_id
+            Exit Function
+        Else
+            ' 写入备份 (非越狱设备会静默失败，但不影响返回)
+            Call WriteBackupFile(backup_path, official_id)
+            GetUniqueDeviceID = official_id
+            Exit Function
+        End If
+    Else
+        ' 其它系统直接使用官方内置设备 ID
+        GetUniqueDeviceID = official_id
+    End If
+End Function
+
+' 辅助函数：读取备份文件内容
+Private Function ReadBackupFile(path)
+    Dim file_content
+    On Error Resume Next
+    file_content = File.Read(path)
+    If file_content = "" Or file_content = Null Then
+        ReadBackupFile = ""
+    Else
+        ' 清除空白字符与换行
+        ReadBackupFile = Trim(file_content)
+    End If
+End Function
+
+' 辅助函数：写入备份文件内容
+Private Function WriteBackupFile(path, content)
+    On Error Resume Next
+    ' File.Write 会在父目录不存在时自动创建相应目录
+    Call File.Write(path, content)
+End Function
+
+' =========================================================================
+' @function: GetDeviceDetailsJson
+' @description: 获取设备物理状态指标，并编码为标准化 JSON 字符串
+' @return {String} 编码后的设备详情 JSON
+' =========================================================================
+Function GetDeviceDetailsJson()
+    Dim os_type, dev_name, dev_model, os_ver, screen_x, screen_y, dpi, is_root, battery, ip
+    On Error Resume Next
+    
+    os_type = GetOSType()
+    dev_name = Device.GetName()
+    dev_model = Device.GetModel()
+    os_ver = Sys.OsVersion()
+    screen_x = GetScreenX()
+    screen_y = GetScreenY()
+    dpi = Device.GetDPI()
+    is_root = IsRoot()
+    battery = Sys.GetBatteryLevel()
+    ip = Device.GetIP()
+    
+    ' 防御性容错，防止变量为空或 Null 导致 JSON 拼接时语法失效
+    If dev_name = "" Or dev_name = Null Then dev_name = "Unknown Name" End If
+    If dev_model = "" Or dev_model = Null Then dev_model = "Unknown Model" End If
+    If os_ver = "" Or os_ver = Null Then os_ver = "Unknown Version" End If
+    If screen_x = "" Or screen_x = Null Then screen_x = 0 End If
+    If screen_y = "" Or screen_y = Null Then screen_y = 0 End If
+    If dpi = "" Or dpi = Null Then dpi = 0 End If
+    If is_root = "" Or is_root = Null Then is_root = 0 End If
+    If battery = "" Or battery = Null Then battery = 100 End If
+    If ip = "" Or ip = Null Then ip = "0.0.0.0" End If
+    
+    ' 使用 Chr(34) 代表双引号，规避 Q 语言编译器的三连双引号限制
+    GetDeviceDetailsJson = "{" & _
+        Chr(34) & "name" & Chr(34) & ":" & Chr(34) & dev_name & Chr(34) & "," & _
+        Chr(34) & "model" & Chr(34) & ":" & Chr(34) & dev_model & Chr(34) & "," & _
+        Chr(34) & "os" & Chr(34) & ":" & Chr(34) & os_type & Chr(34) & "," & _
+        Chr(34) & "osVersion" & Chr(34) & ":" & Chr(34) & os_ver & Chr(34) & "," & _
+        Chr(34) & "resolution" & Chr(34) & ":" & Chr(34) & screen_x & "x" & screen_y & Chr(34) & "," & _
+        Chr(34) & "dpi" & Chr(34) & ":" & dpi & "," & _
+        Chr(34) & "isRoot" & Chr(34) & ":" & is_root & "," & _
+        Chr(34) & "battery" & Chr(34) & ":" & battery & "," & _
+        Chr(34) & "ip" & Chr(34) & ":" & Chr(34) & ip & Chr(34) & _
+        "}"
+End Function
+

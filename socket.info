@@ -1,0 +1,65 @@
+
+{
+	"CliendConnect" : 
+	{
+		"Description" : null,
+		"Name" : "函数已废弃",
+		"TranslateTemplate" : null
+	},
+	"ClientClose" : 
+	{
+		"Description" : "格式: socket.ClientClose()\n解释: 断开服务端连接",
+		"Name" : "断开服务端连接",
+		"TranslateTemplate" : "断开服务端连接"
+	},
+	"ClientConnect" : 
+	{
+		"Description" : "格式: socket.CliendConnect(ip地址,端口)\n解释: 连接服务端",
+		"Name" : "连接服务端",
+		"TranslateTemplate" : "连接到服务端 $1:$2"
+	},
+	"ClientReceive" : 
+	{
+		"Description" : "格式: socket.ClientReceive(模式,超时时间)\n解释: 接收服务端数据(阻塞)",
+		"Name" : "接收服务端数据",
+		"TranslateTemplate" : "接收服务端数据"
+	},
+	"ClientSend" : 
+	{
+		"Description" : "格式: socket.ClientSend(消息)\n解释: 发送消息到服务端",
+		"Name" : "发送消息到服务端",
+		"TranslateTemplate" : "发送 $1 消息到服务端"
+	},
+	"Description" : "网络通信库",
+	"GetLastError" : 
+	{
+		"Description" : "格式: socket.GetLastError()\n解释: 获取最后一次失败的描述信息",
+		"Name" : "获取最后一次错误信息",
+		"TranslateTemplate" : "获取最后一次错误信息"
+	},
+	"Name" : "网络通信库",
+	"TcpClose" : 
+	{
+		"Description" : "格式: socket.TcpClose(TCP对象)\n解释: 断开TCP连接",
+		"Name" : "断开TCP连接",
+		"TranslateTemplate" : "断开TCP连接"
+	},
+	"TcpConnect" : 
+	{
+		"Description" : "格式: socket.TcpConnect(TCP对象,ip地址,端口)\n解释: 建立TCP连接, 返回TCP对象",
+		"Name" : "建立TCP连接",
+		"TranslateTemplate" : "连接到TCP服务端 $1:$2"
+	},
+	"TcpReceive" : 
+	{
+		"Description" : "格式: socket.TcpReceive(TCP对象,模式,超时时间)\n解释: 接收TCP数据(阻塞)",
+		"Name" : "接收TCP数据",
+		"TranslateTemplate" : "接收TCP数据"
+	},
+	"TcpSend" : 
+	{
+		"Description" : "格式: socket.TcpSend(TCP对象,消息)\n解释: 发送TCP数据",
+		"Name" : "发送TCP数据",
+		"TranslateTemplate" : "发送 $1 消息到TCP服务端"
+	}
+}

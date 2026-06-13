@@ -1,0 +1,53 @@
+# SetScreenScale 设置屏幕缩放
+
+> 来源: https://res.anjian.com/basic/device/SetScreenScale.html
+
+---
+
+### 函数名称
+
+SetScreenScale 设置屏幕缩放
+
+### 函数功能
+
+设置当前脚本开发环境的屏幕分辩率，使脚本适配不同分辩率的设备
+
+### 支持环境
+
+     
+| 系统及平台 | ide（助手） | 安卓（root） | 安卓（无障碍 ） | iOS新版（引擎版本） | iOS旧版 |
+| --- | --- | --- | --- | --- | --- |
+| 最低客户端版本 | 1.0.0 | 1.5.3 | 5.0.0 | 2.0.0 | 1.0.0 |
+| 最低系统版本 | windows 7 | 4.4 | 7.0 | 13.0 | 8.0 |
+
+### 函数语法
+
+SetScreenScale(width,height,scale)
+
+### 函数参数
+
+   
+| 参数名 | 参数类型 | 是否必选 | 参数说明 |
+| --- | --- | --- | --- |
+| width | int | 是 | 脚本开发时使用的设备宽度 |
+| height | int | 是 | 脚本开发时使用的设备高度 |
+| scale | int | 否 | 传入传出缩放设置，默认：1  
+0：只对传入函数的坐标进行缩放，从函数返回的坐标不缩放，即为当前使用设备真实坐标  
+1：对传入函数的坐标进行缩放，函数返回的坐标进行反向缩放 |
+
+### 函数返回
+
+无
+
+### 代码范例
+
+```sourceCode lua
+//假设一名作者在540*960分辨率的手机中开发了脚本，要在720*1280的设备中运行
+SetScreenScale 540,960,0
+```
+
+### 备注说明
+
+受屏幕缩放命令影响的命令有： Tap 短暂点击、Touch 按住一段时间、TouchDown 按住不放、TouchMove 模拟滑动、Swipe 模拟划动、GetPixelColor 得到指定点颜色、FindColor 寻找颜色、CmpColor 对比指定点颜色、CmpColorEx 对比多个点颜色、FindMultiColor 多点找色。
+
+// 给每个 <pre> 标签加复制按钮（兼容IE版） var preElements = document.querySelectorAll('pre'); for (var i = 0; i < preElements.length; i++) { (function(preElement) { // 创建按钮 var copyButton = document.createElement('button'); copyButton.innerText = '复制'; copyButton.style.position = 'absolute'; copyButton.style.top = '8px'; copyButton.style.right = '8px'; copyButton.style.padding = '4px 8px'; copyButton.style.fontSize = '12px'; copyButton.style.cursor = 'pointer'; copyButton.style.zIndex = '10'; // 包装一层div var wrapper = document.createElement('div'); wrapper.style.position = 'relative'; wrapper.appendChild(copyButton); wrapper.appendChild(preElement.cloneNode(true)); preElement.parentNode.replaceChild(wrapper, preElement); // 点击按钮 copyButton.addEventListener('click', function() { var codeText = ''; var codeText = wrapper.querySelector('pre').innerText || wrapper.querySelector('pre').textContent; // 确保使用正确的换行符 codeText = codeText.replace(/\\r\\n|\\r|\\n/g, '\\r\\n'); // 统一使用CRLF换行符 if (navigator.clipboard && navigator.clipboard.writeText) { navigator.clipboard.writeText(codeText).then(function() { copyButton.innerText = '已复制!'; setTimeout(function() { copyButton.innerText = '复制'; }, 2000); }).catch(function(err) { console.error('复制失败', err); }); } else { var textArea = document.createElement('textarea'); textArea.value = codeText; document.body.appendChild(textArea); textArea.focus(); textArea.select(); try { var successful = document.execCommand('copy'); if (successful) { copyButton.innerText = '已复制!'; } else { copyButton.innerText = '复制失败'; } setTimeout(function() { copyButton.innerText = '复制'; }, 2000); } catch (err) { console.error('Fallback: 复制失败', err); } document.body.removeChild(textArea); } }); })(preElements\[i\]); }

@@ -1,0 +1,464 @@
+-- =========================================================================
+-- @file: xb_logger.lua
+-- @description: 按键精灵手机版 TCP 日志上报插件 (符合 Nest.js tcp-socket 服务规范)
+-- @author: Antigravity AI
+-- @date: 2026-06-07
+-- =========================================================================
+
+-- socket 与 cjson 兼容：由于按键精灵手机版在子线程环境中缺少全局 Import 函数，且 socket/cjson 均已被按键官方预加载，
+-- 故在此不显式调用 Import 导入，而是直接安全检测全局的 cjson 或 json 对象。
+local active_json = (type(cjson) == "table" and cjson) or (type(json) == "table" and json) or nil
+
+-- =========================================================================
+-- 1. 内置极简 JSON 兼容转换模块 (确保无 Cjson 时绝不报错崩溃)
+-- =========================================================================
+
+local function escape_str(s)
+    s = tostring(s)
+    s = string.gsub(s, "\\", "\\\\")
+    s = string.gsub(s, "\"", "\\\"")
+    s = string.gsub(s, "\n", "\\n")
+    s = string.gsub(s, "\r", "\\r")
+    s = string.gsub(s, "\t", "\\t")
+    return s
+end
+
+local function serialize(val)
+    local t = type(val)
+    if t == "string" then
+        return "\"" .. escape_str(val) .. "\""
+    elseif t == "number" or t == "boolean" then
+        return tostring(val)
+    elseif t == "table" then
+        -- 判断是否为数组
+        local is_array = true
+        local max_idx = 0
+        for k, v in pairs(val) do
+            if type(k) ~= "number" then
+                is_array = false
+                break
+            end
+            if k > max_idx then
+                max_idx = k
+            end
+        end
+        if is_array and max_idx > 0 then
+            local parts = {}
+            for i = 1, max_idx do
+                table.insert(parts, serialize(val[i]))
+            end
+            return "[" .. table.concat(parts, ",") .. "]"
+        else
+            local parts = {}
+            for k, v in pairs(val) do
+                if type(k) == "string" then
+                    table.insert(parts, "\"" .. escape_str(k) .. "\":" .. serialize(v))
+                end
+            end
+            return "{" .. table.concat(parts, ",") .. "}"
+        end
+    else
+        return "null"
+    end
+end
+
+local function json_encode(tbl)
+    if active_json and active_json.Encode then
+        local ok, str = pcall(active_json.Encode, tbl)
+        if ok then return str end
+    end
+    return serialize(tbl)
+end
+
+local function get_json_field(json_str, field)
+    -- 匹配 "field" : "value"
+    local pattern = "\"" .. field .. "\"%s*:%s*\"([^\"]*)\""
+    local val = string.match(json_str, pattern)
+    if val then
+        return val
+    end
+    -- 匹配 "field" : number/boolean/null
+    pattern = "\"" .. field .. "\"%s*:%s*([%w%.]+)"
+    val = string.match(json_str, pattern)
+    return val
+end
+
+local function json_decode_field(json_str, field)
+    if active_json and active_json.Decode then
+        local ok, res = pcall(active_json.Decode, json_str)
+        if ok and res and res[field] ~= nil then
+            return tostring(res[field])
+        end
+    end
+    return get_json_field(json_str, field)
+end
+
+-- =========================================================================
+-- 2. 内部 Socket 安全操作包装 (防止因网络异常抛出 Lua 错误导致线程崩溃)
+-- =========================================================================
+
+local function safe_send(msg)
+    local ok, err = pcall(socket.ClientSend, msg)
+    if not ok then
+        TracePrint(" Nest TCP 发送异常: " .. tostring(err))
+        return false
+    end
+    return true
+end
+
+local function safe_receive(timeout)
+    -- socket.ClientReceive(buf_size, timeout)
+    -- 根据按键官方文档，不限制接收长度时第一个参数可以传 0
+    local ok, res = pcall(socket.ClientReceive, 0, timeout)
+    if not ok then
+        TracePrint(" Nest TCP 接收异常: " .. tostring(res))
+        return false, res
+    end
+    return true, res
+end
+
+local function safe_close()
+    pcall(socket.ClientClose)
+end
+
+-- =========================================================================
+-- 3. QMPlugin 全局导出模块定义
+-- =========================================================================
+
+QMPlugin = {}
+
+--- 初始化配置，由主线程调用
+-- @param ip 服务器IP
+-- @param port 服务器端口
+-- @param code 注册码
+-- @param deviceId 设备唯一ID
+-- @param appName 应用/脚本名称
+function QMPlugin.Init(ip, port, code, deviceId, appName)
+    -- 将配置和参数注入多线程共享变量中，供后台发送子线程读取
+    Thread.SetShareVar("xb_logger_ip", ip or "127.0.0.1")
+    Thread.SetShareVar("xb_logger_port", tonumber(port) or 8082)
+    Thread.SetShareVar("xb_logger_code", code or "")
+    Thread.SetShareVar("xb_logger_device_id", deviceId or "")
+    Thread.SetShareVar("xb_logger_app_name", appName or "AnjianClient")
+    
+    -- 共享队列读写指针重置
+    Thread.SetShareVar("xb_logger_write_idx", 0)
+    Thread.SetShareVar("xb_logger_read_idx", 0)
+    
+    -- 状态控制变量
+    Thread.SetShareVar("xb_logger_status", "initialized")
+    Thread.SetShareVar("xb_logger_is_streaming", 0) -- 0: 仅本地缓存, 1: 开启实时日志流推送
+    Thread.SetShareVar("xb_logger_force_exit", 0)  -- 0: 运行中, 1: 要求子线程退出并归档
+    
+    TracePrint "Nest TCP 日志插件初始化完毕"
+end
+
+--- 内部通用的日志压栈函数
+local function push_log(level, module_name, content)
+    local status = Thread.GetShareVar("xb_logger_status")
+    if not status or status == "uninitialized" then
+        return
+    end
+
+    -- 获取当前时间
+    local time_str = os.date("%X") -- 格式化当前时分秒 12:34:56
+    local timestamp = os.time() * 1000 -- 生成毫秒级时间戳供后端使用
+
+    local log_item = {
+        level = level,
+        module = module_name or "CLIENT",
+        content = content or "",
+        time = time_str,
+        timestamp = timestamp
+    }
+
+    local log_json = json_encode(log_item)
+
+    -- 主线程将日志转为字符串，写入全局多线程队列缓存
+    local write_idx = tonumber(Thread.GetShareVar("xb_logger_write_idx")) or 0
+    write_idx = write_idx + 1
+    
+    Thread.SetShareVar("xb_logger_item_" .. write_idx, log_json)
+    Thread.SetShareVar("xb_logger_write_idx", write_idx)
+end
+
+--- 写入 INFO 日志
+function QMPlugin.Info(module_name, content)
+    push_log("INFO", module_name, content)
+end
+
+--- 写入 WARN 日志
+function QMPlugin.Warn(module_name, content)
+    push_log("WARN", module_name, content)
+end
+
+--- 写入 ERROR 日志
+function QMPlugin.Error(module_name, content)
+    push_log("ERROR", module_name, content)
+end
+
+--- 主线程要求安全退出并切断 TCP
+function QMPlugin.Close()
+    Thread.SetShareVar("xb_logger_force_exit", 1)
+    TracePrint "已向 Nest 日志守护线程发送安全关闭指令"
+end
+
+-- =========================================================================
+-- 4. 后台子线程 Worker (由主脚本通过 Thread.Start(xb_logger.ThreadWorker) 拉起)
+-- =========================================================================
+
+function QMPlugin.ThreadWorker()
+    -- 读取连接配置
+    local ip = Thread.GetShareVar("xb_logger_ip")
+    local port = tonumber(Thread.GetShareVar("xb_logger_port")) or 8082
+    local code = Thread.GetShareVar("xb_logger_code")
+    local device_id = Thread.GetShareVar("xb_logger_device_id")
+    local app_name = Thread.GetShareVar("xb_logger_app_name")
+
+    if not code or code == "" or not device_id or device_id == "" then
+        TracePrint "Nest TCP 守护线程启动失败: 注册码或设备ID缺失"
+        Thread.SetShareVar("xb_logger_status", "error_config")
+        return
+    end
+
+    TracePrint "Nest TCP 守护线程已拉起，准备接入连接..."
+
+    local local_read_idx = 0
+    local pending_archive = {} -- 本地待落库归档队列 (保存解析后的 Lua table)
+    local last_archive_time = os.time()
+    local is_streaming = false
+    local last_ping_time = os.time()
+
+    while true do
+        -- A. 检查主线程是否要求安全关闭
+        local force_exit = tonumber(Thread.GetShareVar("xb_logger_force_exit")) or 0
+        if force_exit == 1 then
+            TracePrint " Nest TCP 接收到主线程退出信号，准备发送归档日志..."
+            break
+        end
+
+        local current_status = Thread.GetShareVar("xb_logger_status")
+        if current_status == "kicked" or current_status == "closed" then
+            break
+        end
+
+        -- B. 状态机：如果当前未连接/未授权，尝试进行物理连接与鉴权握手
+        if current_status ~= "authorized" then
+            Thread.SetShareVar("xb_logger_status", "connecting")
+            TracePrint("Nest TCP 正在尝试建立连接到: " .. ip .. ":" .. tostring(port))
+            
+            local connect_ok = socket.ClientConnect(ip, port)
+            if connect_ok then
+                TracePrint "Nest TCP 物理连接建立成功，正在进行鉴权握手..."
+                
+                -- 发送鉴权数据帧
+                local auth_payload = json_encode({
+                    action = "auth",
+                    code = code,
+                    deviceId = device_id,
+                    appName = app_name
+                })
+                
+                if safe_send(auth_payload .. "\n") then
+                    -- 接收服务器的鉴权结果 (设置 3000ms 超时)
+                    local ok, auth_resp = safe_receive(3000)
+                    if ok and auth_resp and auth_resp ~= "" then
+                        local status = json_decode_field(auth_resp, "status")
+                        if status == "ok" then
+                            Thread.SetShareVar("xb_logger_status", "authorized")
+                            last_ping_time = os.time()
+                            TracePrint " Nest TCP 鉴权激活成功，开启守护循环！"
+                        else
+                            local errMsg = json_decode_field(auth_resp, "message") or "未知原因"
+                            TracePrint(" Nest TCP 鉴权失败: " .. errMsg)
+                            safe_close()
+                            Thread.SetShareVar("xb_logger_status", "auth_failed")
+                            -- 鉴权失败属于凭证错误，不需要无限重试
+                            break
+                        end
+                    else
+                        TracePrint " Nest TCP 鉴权超时或异常，物理连接断开"
+                        safe_close()
+                        Thread.SetShareVar("xb_logger_status", "disconnected")
+                    end
+                else
+                    TracePrint " Nest TCP 鉴权发送失败，物理连接断开"
+                    safe_close()
+                    Thread.SetShareVar("xb_logger_status", "disconnected")
+                end
+            else
+                TracePrint "Nest TCP 物理连接失败，10秒后重试..."
+                Thread.SetShareVar("xb_logger_status", "disconnected")
+                -- 优雅退避，防止频繁重连占用 CPU
+                for i = 1, 100 do
+                    if tonumber(Thread.GetShareVar("xb_logger_force_exit")) == 1 then
+                        break
+                    end
+                    Delay(100)
+                end
+            end
+        end
+
+        -- C. 若连接已授权，执行心跳、监听接收、以及消费发送逻辑
+        if Thread.GetShareVar("xb_logger_status") == "authorized" then
+            local now = os.time()
+            local connection_healthy = true
+
+            -- 1. 心跳维护 (每 30 秒发送一次 ping)
+            if now - last_ping_time >= 30 then
+                local ping_payload = json_encode({
+                    action = "ping",
+                    deviceId = device_id
+                })
+                if not safe_send(ping_payload .. "\n") then
+                    connection_healthy = false
+                else
+                    last_ping_time = now
+                end
+            end
+
+            -- 2. 非阻塞接收服务器下行指令 (超时 50ms 防止卡主线程)
+            if connection_healthy then
+                local ok, server_msg = safe_receive(50)
+                if not ok then
+                    connection_healthy = false
+                elseif server_msg and server_msg ~= "" then
+                    for line in string.gmatch(server_msg, "[^\n]+") do
+                        local cmd = json_decode_field(line, "cmd")
+                        if cmd == "start_log_stream" then
+                            is_streaming = true
+                            Thread.SetShareVar("xb_logger_is_streaming", 1)
+                            TracePrint " Nest 实时指令：开启实时日志流上报"
+                        elseif cmd == "stop_log_stream" then
+                            is_streaming = false
+                            Thread.SetShareVar("xb_logger_is_streaming", 0)
+                            TracePrint " Nest 实时指令：关闭实时流，日志写入本地归档缓存"
+                        elseif cmd == "force_kick" then
+                            local kickMsg = json_decode_field(line, "message") or "设备已在后台解绑"
+                            TracePrint(" Nest 强制下线: " .. kickMsg)
+                            safe_close()
+                            Thread.SetShareVar("xb_logger_status", "kicked")
+                            return
+                        end
+                    end
+                end
+            end
+
+            -- 3. 消费主线程新产生的日志
+            if connection_healthy then
+                local write_idx = tonumber(Thread.GetShareVar("xb_logger_write_idx")) or 0
+                local chunk_logs = {}
+
+                -- 循环取出日志，避免并发竞争导致的脏读
+                while local_read_idx < write_idx do
+                    local next_idx = local_read_idx + 1
+                    local log_item_str = Thread.GetShareVar("xb_logger_item_" .. next_idx)
+                    
+                    if log_item_str and log_item_str ~= "" then
+                        -- 放入本轮实时推送缓冲
+                        table.insert(chunk_logs, log_item_str)
+
+                        -- 解析日志以用于归档
+                        local parse_ok, log_tbl = pcall(function()
+                            if active_json and active_json.Decode then
+                                return active_json.Decode(log_item_str)
+                            else
+                                return {
+                                    level = get_json_field(log_item_str, "level"),
+                                    module = get_json_field(log_item_str, "module"),
+                                    content = get_json_field(log_item_str, "content"),
+                                    timestamp = tonumber(get_json_field(log_item_str, "timestamp"))
+                                }
+                            end
+                        end)
+
+                        if parse_ok and log_tbl then
+                            table.insert(pending_archive, log_tbl)
+                        end
+
+                        -- 清空已成功读出的共享槽，释放内存
+                        Thread.SetShareVar("xb_logger_item_" .. next_idx, "")
+                        
+                        -- 更新消费索引
+                        local_read_idx = next_idx
+                        Thread.SetShareVar("xb_logger_read_idx", local_read_idx)
+                    else
+                        -- 关键保护：说明 write_idx 已增加，但 SetShareVar 还未物理执行完毕。
+                        -- 退出当前消费循环，保留 local_read_idx 进度，等待下一轮轮询消费。
+                        break
+                    end
+                end
+
+                -- A. 如果开启了实时推流，立即发送本轮的日志
+                if is_streaming and #chunk_logs > 0 then
+                    local logs_array_str = "[" .. table.concat(chunk_logs, ",") .. "]"
+                    local chunk_payload = "{\"action\":\"log_chunk\",\"deviceId\":\"" .. device_id .. "\",\"logs\":" .. logs_array_str .. "}"
+                    if not safe_send(chunk_payload .. "\n") then
+                        connection_healthy = false
+                    end
+                end
+
+                -- B. 定期定量批量落库归档 (触发条件: 超过 20 条日志，或间隔上次归档超过 30 秒)
+                if connection_healthy and #pending_archive > 0 then
+                    if #pending_archive >= 20 or (now - last_archive_time >= 30) then
+                        TracePrint(" 正在触发定时批量落库，日志条数: " .. #pending_archive)
+                        local exit_payload = json_encode({
+                            action = "exit_log",
+                            deviceId = device_id,
+                            logs = pending_archive
+                        })
+                        if safe_send(exit_payload .. "\n") then
+                            -- 等待服务端落库成功回复 (设置 2000ms 超时)
+                            local ok, archive_resp = safe_receive(2000)
+                            if ok and archive_resp and string.find(archive_resp, "Exit logs archived successfully") then
+                                -- 落库成功，清空本地已上传缓存，重置时间
+                                pending_archive = {}
+                                last_archive_time = now
+                                TracePrint " 批量落库数据库持久化完成，清空本地内存队列。"
+                            else
+                                TracePrint " 批量落库未收到响应或接收异常，保留缓存等待下一次尝试"
+                                if not ok then
+                                    connection_healthy = false
+                                end
+                            end
+                        else
+                            connection_healthy = false
+                        end
+                    end
+                end
+            end
+
+            -- 如果在数据交互阶段检测到物理连接故障，则重置状态，关闭 Socket，等待下一次循环自动重连
+            if not connection_healthy then
+                TracePrint " 检测到 Socket 连接已断开，关闭连接句柄并切换至 disconnected 状态"
+                safe_close()
+                Thread.SetShareVar("xb_logger_status", "disconnected")
+            end
+        end
+
+        Delay(100)
+    end
+
+    -- 4. 退出阶段: 归档最后残留于缓存中的日志数据 (退出批量落库)
+    if #pending_archive > 0 then
+        local current_status = Thread.GetShareVar("xb_logger_status")
+        if current_status == "authorized" then
+            TracePrint("正在上传最终残留归档日志，条数: " .. #pending_archive)
+            local exit_payload = json_encode({
+                action = "exit_log",
+                deviceId = device_id,
+                logs = pending_archive
+            })
+            safe_send(exit_payload .. "\n")
+            Delay(250)
+        else
+            TracePrint("网络状态异常，本地未上传的最终归档日志已被丢弃，条数: " .. #pending_archive)
+        end
+    end
+
+    -- 5. 切断物理连接，彻底释放 socket 句柄
+    safe_close()
+    Thread.SetShareVar("xb_logger_status", "closed")
+    TracePrint "Nest TCP 守护线程已安全切断并退出。"
+end
+

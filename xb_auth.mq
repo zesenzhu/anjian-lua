@@ -1,0 +1,69 @@
+' =========================================================================
+' @file: xb_auth.mq
+' @description: 业务脚本卡密授权与设备自动绑定验证模块 (HTTP)
+' @author: Antigravity AI
+' @date: 2026-06-09
+' =========================================================================
+
+Import "cjson.lua"
+
+' 验证卡密授权 (未绑定时自动绑定，已达上限返回失败)
+' @param {String} serverUrl NestJS 服务端地址 (例如 "http://192.168.31.17:8082")
+' @param {String} code 激活码卡密
+' @return {Boolean} 是否通过授权认证
+Function VerifyCode(serverUrl, code)
+    Dim device_id, post_data, response, resp_tbl, success, msg
+    VerifyCode = False
+    
+    ' 1. 获取按键精灵内置的唯一设备 ID (iOS 和 Android 双端抹平)
+    device_id = GetDeviceID()
+    If device_id = "" Or device_id = Null Then
+        TracePrint "【授权系统】获取设备唯一ID失败，禁止运行"
+        Exit Function
+    End If
+    
+    ' 2. 构造 Form urlencoded 格式请求体，确保任何环境下 Nest.js 都能解析出 @Body()
+    post_data = "code=" & code & "&deviceId=" & device_id
+    
+    TracePrint "【授权系统】===== 开始鉴权调试请求 ====="
+    TracePrint "【授权系统】服务器地址: " & serverUrl
+    TracePrint "【授权系统】请求 URL: " & serverUrl & "/api/register-codes/verify"
+    TracePrint "【授权系统】请求参数: " & post_data
+    TracePrint "【授权系统】设备 ID: " & device_id
+    TracePrint "【授权系统】正在向服务器发送请求..."
+    
+    ' 3. 向 Nest 后端发送同步 HTTP POST 请求 (注意：Nest 统一前缀为 /api)
+    response = URL.Post(serverUrl & "/api/register-codes/verify", post_data)
+    
+    TracePrint "【授权系统】服务器返回原始数据: " & CStr(response)
+    
+    If response = "" Or response = Null Then
+        TracePrint "【授权系统】网络异常：连接鉴权服务器失败，请检查网络配置或服务器状态"
+        Exit Function
+    End If
+    
+    ' 💡 防崩溃校验：检查返回内容是否包含 JSON 格式标志。若返回 HTML 404/502，直接解析会导致 cjson 库崩溃闪退（助手异常停止）
+    If InStr(1, response, "{") = 0 Then
+        TracePrint "【授权系统】错误：服务器返回的内容不是标准的 JSON 格式，跳过解析。内容如上所示。"
+        Exit Function
+    End If
+    
+    ' 4. 导入 cjson 并解析 JSON 返回结果
+    resp_tbl = Cjson.Decode(response)
+    
+    If resp_tbl = Null Then
+        TracePrint "【授权系统】服务器返回格式异常，无法解析授权数据"
+        Exit Function
+    End If
+    
+    success = resp_tbl["success"]
+    msg = resp_tbl["message"]
+    
+    If success = true Then
+        TracePrint "【授权系统】认证通过！卡密有效期至: " & CStr(resp_tbl["expireTime"])
+        VerifyCode = True
+    Else
+        TracePrint "【授权系统】认证拒绝！原因: " & msg
+        VerifyCode = False
+    End If
+End Function
