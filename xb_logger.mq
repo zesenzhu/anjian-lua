@@ -90,16 +90,35 @@ End Function
 
 Function Close()
     Call Thread.SetShareVar("xb_logger_force_exit", 1)
-    Dim sh, device_id, exit_send_str
-    sh = Thread.GetShareVar("xb_logger_socket_handle")
+    
+    Dim ip, port, code, device_id, app_name, dev_info, sh, auth_str, exit_send_str
+    ip = Thread.GetShareVar("xb_logger_ip")
+    port = Thread.GetShareVar("xb_logger_port")
+    code = Thread.GetShareVar("xb_logger_code")
     device_id = Thread.GetShareVar("xb_logger_device_id")
-    If sh <> "" And sh <> false And sh <> 0 And device_id <> "" Then
-        ' 主线程在 OnScriptExit 阶段同步发送一个 exit_log 动作，确保服务端立刻标记 isExiting = true
-        exit_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "exit_log" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[]}" & Chr(10)
-        Call socket.TcpSend(sh, exit_send_str)
-        Delay 200
-        Call socket.TcpClose(sh)
-        Call Thread.SetShareVar("xb_logger_socket_handle", "")
+    app_name = Thread.GetShareVar("xb_logger_app_name")
+    dev_info = Thread.GetShareVar("xb_logger_device_info")
+    
+    If ip <> "" And port <> "" And code <> "" And device_id <> "" Then
+        TracePrint "主线程 OnScriptExit 开始连接服务器以发送优雅退出信号..."
+        sh = socket.TcpConnect(ip, CInt(port))
+        If sh <> "" And sh <> false And sh <> 0 Then
+            If dev_info = "" Then
+                dev_info = "{}"
+            End If
+            If app_name = "" Then
+                app_name = "UNKNOWN_APP"
+            End If
+            auth_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "auth" & Chr(34) & "," & Chr(34) & "code" & Chr(34) & ":" & Chr(34) & code & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "appName" & Chr(34) & ":" & Chr(34) & app_name & Chr(34) & "," & Chr(34) & "deviceInfo" & Chr(34) & ":" & dev_info & "}" & Chr(10)
+            exit_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "exit_log" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[]}" & Chr(10)
+            
+            Call socket.TcpSend(sh, auth_str)
+            Delay 150
+            Call socket.TcpSend(sh, exit_send_str)
+            Delay 150
+            Call socket.TcpClose(sh)
+            TracePrint "主线程已成功通过独立短连接发送退出标志。"
+        End If
     End If
 End Function
 
@@ -169,7 +188,6 @@ Sub ThreadWorker()
             ' 调用无状态 TcpConnect 获取连接句柄
             socket_handle = socket.TcpConnect(ip, CInt(port))
             If socket_handle <> "" And socket_handle <> false And socket_handle <> 0 Then
-                Call Thread.SetShareVar("xb_logger_socket_handle", socket_handle)
                 TracePrint "Nest TCP 物理连接建立成功，正在进行鉴权握手..."
                 Delay 500
                 
@@ -518,12 +536,9 @@ Sub ThreadWorker()
                 Call socket.TcpClose(socket_handle)
                 socket_handle = ""
                 Call Thread.SetShareVar("xb_logger_status", "disconnected")
-                Call Thread.SetShareVar("xb_logger_socket_handle", "")
             End If
         End If
         
-        ' 实时将最新的局部句柄同步至共享变量，方便主线程在 OnScriptExit 阶段同步调用
-        Call Thread.SetShareVar("xb_logger_socket_handle", socket_handle)
         Delay 100
     Loop
     
@@ -569,7 +584,6 @@ Sub ThreadWorker()
         Call socket.TcpClose(socket_handle)
         socket_handle = ""
     End If
-    Call Thread.SetShareVar("xb_logger_socket_handle", "")
     Call Thread.SetShareVar("xb_logger_status", "closed")
     TracePrint "Nest TCP 守护线程已安全切断并退出。"
 End Sub
