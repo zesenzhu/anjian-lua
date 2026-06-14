@@ -18,6 +18,15 @@ Function Init(ip, port, code, deviceId, appName)
     Call Thread.SetShareVar("xb_logger_app_name", appName)
     Call Thread.SetShareVar("xb_logger_device_info", "{}")
     
+    ' 读取 UI 配置（此时在主线程，必然能成功读取）并存为共享变量，以解决非主线程中读取 UI 失败的 Bug并降低高频读取开销
+    Dim enable_log
+    enable_log = ReadUIConfig("开启日志上报", true)
+    If enable_log = true Or enable_log = 1 Or enable_log = "true" Then
+        Call Thread.SetShareVar("xb_logger_enable", 1)
+    Else
+        Call Thread.SetShareVar("xb_logger_enable", 0)
+    End If
+    
     Call Thread.SetShareVar("xb_logger_write_idx", 0)
     Call Thread.SetShareVar("xb_logger_read_idx", 0)
     Call Thread.SetShareVar("xb_logger_status", "initialized")
@@ -36,6 +45,13 @@ Function InitEx(ip, port, code, deviceId, appName, deviceInfoJson)
 End Function
 
 Sub __push_log(level, module_name, content)
+    ' 防御性快速退出：若用户关闭了日志功能（或未初始化），直接退出，不产生任何计算与内存开销
+    Dim enable_log
+    enable_log = Thread.GetShareVar("xb_logger_enable")
+    If enable_log = "" Or enable_log = 0 Or enable_log = "0" Then
+        Exit Sub
+    End If
+
     Dim daemon_hb, time_str, timestamp, safe_content, safe_module, log_json, write_idx
     
     ' 1. 内存获取解耦：将 zm.GetScriptMemory 在主线程 __push_log 中获取并共享给子线程
