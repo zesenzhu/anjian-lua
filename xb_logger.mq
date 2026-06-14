@@ -149,7 +149,7 @@ Sub ThreadWorker()
     Dim socket_handle, dev_info, send_ret, auth_lines, auth_lines_count, auth_line_i, auth_line, first_line_tbl, cmd_line_tbl
     Dim current_battery, front_app, is_locked, vpn_status, chunk_send_str
     Dim last_front_app, last_is_locked, last_vpn_status, last_battery, current_mem, last_mem, is_switching, need_force_ping, last_micro_tick
-    Dim app_list, app_len, app_idx, real_app_name, start_tick, run_secs, cur_task
+    Dim real_app_name, start_tick, run_secs, cur_task
     
     ' 声明本地 socket 句柄变量，用于无状态连接，彻底规避跨线程局部句柄变量丢失的 Bug
     socket_handle = ""
@@ -181,7 +181,7 @@ Sub ThreadWorker()
     last_battery = -1
     last_mem = 0
     last_micro_tick = TickCount()
-    app_list = Sys.GetAppList()
+
     
     Do
         Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
