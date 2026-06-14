@@ -18,13 +18,11 @@ Function Init(ip, port, code, deviceId, appName)
     Call Thread.SetShareVar("xb_logger_app_name", appName)
     Call Thread.SetShareVar("xb_logger_device_info", "{}")
     
-    ' 读取 UI 配置（此时在主线程，必然能成功读取）并存为共享变量，以解决非主线程中读取 UI 失败的 Bug并降低高频读取开销
+    ' 优先读取由主文件在主线程中写入的共享变量，若为空（兼容旧版直接调用 Init 的情况）则默认开启。
     Dim enable_log
-    enable_log = ReadUIConfig("开启日志上报", true)
-    If enable_log = true Or enable_log = 1 Or enable_log = "true" Then
+    enable_log = Thread.GetShareVar("xb_logger_enable")
+    If enable_log = "" Then
         Call Thread.SetShareVar("xb_logger_enable", 1)
-    Else
-        Call Thread.SetShareVar("xb_logger_enable", 0)
     End If
     
     Call Thread.SetShareVar("xb_logger_write_idx", 0)
