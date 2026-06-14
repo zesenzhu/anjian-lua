@@ -149,6 +149,7 @@ Sub ThreadWorker()
     Dim socket_handle, dev_info, send_ret, auth_lines, auth_lines_count, auth_line_i, auth_line, first_line_tbl, cmd_line_tbl
     Dim current_battery, front_app, is_locked, vpn_status, chunk_send_str
     Dim last_front_app, last_is_locked, last_vpn_status, last_battery, current_mem, last_mem, is_switching, need_force_ping, last_micro_tick
+    Dim app_list, app_len, app_idx, real_app_name, start_tick, run_secs, cur_task
     
     ' 声明本地 socket 句柄变量，用于无状态连接，彻底规避跨线程局部句柄变量丢失的 Bug
     socket_handle = ""
@@ -180,6 +181,7 @@ Sub ThreadWorker()
     last_battery = -1
     last_mem = 0
     last_micro_tick = TickCount()
+    app_list = Sys.GetAppList()
     
     Do
         Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
@@ -407,13 +409,40 @@ Sub ThreadWorker()
                     is_switching = 0
                 End If
                 
-                front_app = Replace(front_app, Chr(92), Chr(92) & Chr(92))
-                front_app = Replace(front_app, Chr(34), Chr(92) & Chr(34))
+                ' 1. 计算已运行时间 runningTime (秒)
+                start_tick = Thread.GetShareVar("xb_script_start_tick")
+                If start_tick = "" Then
+                    run_secs = 0
+                Else
+                    run_secs = CInt((TickCount() - CLng(start_tick)) / 1000)
+                End If
+                
+                ' 2. 获取当前任务名并 JSON 过滤转义
+                cur_task = Thread.GetShareVar("xb_script_current_task")
+                If cur_task = "" Then
+                    cur_task = "常规挂机"
+                End If
+                cur_task = Replace(cur_task, Chr(92), Chr(92) & Chr(92))
+                cur_task = Replace(cur_task, Chr(34), Chr(92) & Chr(34))
+                
+                ' 3. 翻译前台应用包名为真实名称
+                real_app_name = ""
+                If InStr(1, front_app, "frxxz") > 0 Or InStr(1, front_app, "frxxcrjp") > 0 Then
+                    real_app_name = "凡人修仙传:人界篇"
+                ElseIf InStr(1, front_app, "tmgp.cf") > 0 Then
+                    real_app_name = "穿越火线:枪战王者"
+                Else
+                    real_app_name = front_app
+                End If
+                real_app_name = Replace(real_app_name, Chr(92), Chr(92) & Chr(92))
+                real_app_name = Replace(real_app_name, Chr(34), Chr(92) & Chr(34))
                 
                 ping_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "ping" & Chr(34) & "," & _
                            Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & _
                            Chr(34) & "battery" & Chr(34) & ":" & current_battery & "," & _
-                           Chr(34) & "frontApp" & Chr(34) & ":" & Chr(34) & front_app & Chr(34) & "," & _
+                           Chr(34) & "frontApp" & Chr(34) & ":" & Chr(34) & real_app_name & Chr(34) & "," & _
+                           Chr(34) & "currentTask" & Chr(34) & ":" & Chr(34) & cur_task & Chr(34) & "," & _
+                           Chr(34) & "runningTime" & Chr(34) & ":" & run_secs & "," & _
                            Chr(34) & "isLocked" & Chr(34) & ":" & is_locked & "," & _
                            Chr(34) & "vpnStatus" & Chr(34) & ":" & vpn_status & "," & _
                            Chr(34) & "scriptMemory" & Chr(34) & ":" & current_mem & "," & _

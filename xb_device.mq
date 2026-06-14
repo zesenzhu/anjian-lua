@@ -88,11 +88,18 @@ End Function
 ' @description: 获取设备物理状态指标，并编码为标准化 JSON 字符串
 ' @return {String} 编码后的设备详情 JSON
 ' =========================================================================
-Function GetDeviceDetailsJson()
+Function GetDeviceDetailsJson(customName)
     Dim os_type, dev_name, dev_model, os_ver, screen_x, screen_y, dpi, is_root, battery, ip, dev_type
     
     os_type = Device.GetOSType()
-    dev_name = Device.GetName()
+    
+    ' 优先级：用户填的云机名称 (customName) > 物理设备名称 (Device.GetName()) > 空字符
+    If customName <> "" Then
+        dev_name = customName
+    Else
+        dev_name = Device.GetName()
+    End If
+    
     dev_model = Device.GetModel()
     os_ver = Sys.OsVersion()
     screen_x = GetScreenX()
@@ -105,7 +112,7 @@ Function GetDeviceDetailsJson()
     
     ' 防御性容错，防止变量为空导致 JSON 拼接时语法失效
     If dev_name = "" Then
-        dev_name = "Unknown Name"
+        dev_name = ""
     End If
     If dev_model = "" Then
         dev_model = "Unknown Model"
