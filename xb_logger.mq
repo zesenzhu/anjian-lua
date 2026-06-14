@@ -425,15 +425,8 @@ Sub ThreadWorker()
                 cur_task = Replace(cur_task, Chr(92), Chr(92) & Chr(92))
                 cur_task = Replace(cur_task, Chr(34), Chr(92) & Chr(34))
                 
-                ' 3. 翻译前台应用包名为真实名称
-                real_app_name = ""
-                If InStr(1, front_app, "frxxz") > 0 Or InStr(1, front_app, "frxxcrjp") > 0 Then
-                    real_app_name = "凡人修仙传:人界篇"
-                ElseIf InStr(1, front_app, "tmgp.cf") > 0 Then
-                    real_app_name = "穿越火线:枪战王者"
-                Else
-                    real_app_name = front_app
-                End If
+                ' 3. 直接上报前台应用包名，翻译留给后台处理
+                real_app_name = front_app
                 real_app_name = Replace(real_app_name, Chr(92), Chr(92) & Chr(92))
                 real_app_name = Replace(real_app_name, Chr(34), Chr(92) & Chr(34))
                 
