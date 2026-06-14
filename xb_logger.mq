@@ -23,6 +23,7 @@ Function Init(ip, port, code, deviceId, appName)
     Call Thread.SetShareVar("xb_logger_status", "initialized")
     Call Thread.SetShareVar("xb_logger_is_streaming", 0)
     Call Thread.SetShareVar("xb_logger_force_exit", 0)
+    Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
     
     TracePrint "Nest TCP 日志插件初始化完毕"
 End Function
@@ -34,13 +35,20 @@ Function InitEx(ip, port, code, deviceId, appName, deviceInfoJson)
     End If
 End Function
 
-
 Sub __push_log(level, module_name, content)
-    Dim status, time_str, timestamp, log_json, write_idx, safe_content, safe_module
-
-    status = Thread.GetShareVar("xb_logger_status")
-    If status = "uninitialized" Or status = "" Then
-        Exit Sub
+    Dim daemon_hb, time_str, timestamp, safe_content, safe_module, log_json, write_idx
+    
+    ' 1. 内存获取解耦：将 zm.GetScriptMemory 在主线程 __push_log 中获取并共享给子线程
+    Call Thread.SetShareVar("xb_logger_main_mem", zm.GetScriptMemory())
+    
+    ' 2. 线程守护：主线程检测子线程心跳，超时 30 秒自动拉起守护线程
+    daemon_hb = Thread.GetShareVar("xb_logger_daemon_last_heartbeat")
+    If daemon_hb <> "" And daemon_hb <> 0 Then
+        If TickCount() - CInt(daemon_hb) > 30000 Then
+            TracePrint "【守护警报】检测到日志发送子线程无响应，主线程正在重新拉起守护线程..."
+            Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
+            Call Thread.Start(ThreadWorker)
+        End If
     End If
     
     time_str = DateTime.Format("%X")
@@ -130,6 +138,7 @@ Sub ThreadWorker()
     last_micro_tick = TickCount()
     
     Do
+        Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
         force_exit = Thread.GetShareVar("xb_logger_force_exit")
         If force_exit = 1 Then
             TracePrint "Nest TCP 接收到主线程退出信号，准备发送归档日志..."
@@ -323,7 +332,7 @@ Sub ThreadWorker()
                     current_battery = 100
                 End If
                 
-                current_mem = zm.GetScriptMemory()
+                current_mem = Thread.GetShareVar("xb_logger_main_mem")
                 If current_mem = "" Or current_mem < 0 Then
                     current_mem = 0
                 End If
@@ -462,7 +471,7 @@ Sub ThreadWorker()
                     If pending_count >= 20 Or (TickCount() - last_archive_time >= 30000) Then
                         TracePrint "正在触发定时批量落库，日志条数: " & pending_count
                         
-                        exit_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "exit_log" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[" & pending_archive_str & "]}" & Chr(10)
+                        exit_send_str = "{" & Chr(34) & "action" & Chr(34) & ":" & Chr(34) & "archive_log" & Chr(34) & "," & Chr(34) & "deviceId" & Chr(34) & ":" & Chr(34) & device_id & Chr(34) & "," & Chr(34) & "logs" & Chr(34) & ":[" & pending_archive_str & "]}" & Chr(10)
                         
                         If socket.TcpSend(socket_handle, exit_send_str) Then
                             archive_resp = ""
@@ -473,7 +482,7 @@ Sub ThreadWorker()
                                 End If
                                 Delay 100
                             Next
-                            If archive_resp <> "" And InStr(1, archive_resp, "Exit logs archived successfully") > 0 then
+                            If archive_resp <> "" And InStr(1, archive_resp, "archived successfully") > 0 then
                                 pending_archive_str = ""
                                 pending_count = 0
                                 last_archive_time = TickCount()
