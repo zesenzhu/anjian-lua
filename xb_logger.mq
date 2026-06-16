@@ -32,6 +32,13 @@ Function Init(ip, port, code, deviceId, appName)
     Call Thread.SetShareVar("xb_logger_force_exit", 0)
     Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
     
+    ' 初始化主线程持有的设备状态共享变量默认值
+    Call Thread.SetShareVar("xb_logger_main_battery", 100)
+    Call Thread.SetShareVar("xb_logger_main_front", "unknown")
+    Call Thread.SetShareVar("xb_logger_main_locked", 0)
+    Call Thread.SetShareVar("xb_logger_main_vpn", 0)
+    Call Thread.SetShareVar("xb_logger_main_mem", 0)
+    
     TracePrint "Nest TCP 日志插件初始化完毕"
 End Function
 
@@ -51,9 +58,39 @@ Sub __push_log(level, module_name, content)
     End If
 
     Dim daemon_hb, time_str, timestamp, safe_content, safe_module, log_json, write_idx
+    Dim temp_battery, temp_front, temp_locked, temp_vpn
     
     ' 1. 内存获取解耦：将 zm.GetScriptMemory 在主线程 __push_log 中获取并共享给子线程
     Call Thread.SetShareVar("xb_logger_main_mem", zm.GetScriptMemory())
+    
+    ' 1.5 在主线程安全更新并共享各项状态指标
+    temp_battery = Sys.GetBatteryLevel()
+    If temp_battery = "" Then
+        temp_battery = 100
+    End If
+    Call Thread.SetShareVar("xb_logger_main_battery", temp_battery)
+    
+    temp_front = Sys.GetFront()
+    If temp_front = "" Then
+        temp_front = "unknown"
+    End If
+    Call Thread.SetShareVar("xb_logger_main_front", temp_front)
+    
+    temp_locked = Device.IsLock()
+    If temp_locked = true Or temp_locked = 1 Then
+        temp_locked = 1
+    Else
+        temp_locked = 0
+    End If
+    Call Thread.SetShareVar("xb_logger_main_locked", temp_locked)
+    
+    temp_vpn = Device.GetVPNStatus()
+    If temp_vpn = true Or temp_vpn = 1 Then
+        temp_vpn = 1
+    Else
+        temp_vpn = 0
+    End If
+    Call Thread.SetShareVar("xb_logger_main_vpn", temp_vpn)
     
     ' 2. 线程守护：主线程检测子线程心跳，超时 30 秒自动拉起守护线程
     daemon_hb = Thread.GetShareVar("xb_logger_daemon_last_heartbeat")
@@ -101,6 +138,58 @@ End Function
 Function Error(module_name, content)
     Call __push_log("ERROR", module_name, content)
 End Function
+
+Sub KeepAlive()
+    ' 防御性快速退出：若用户关闭了日志功能（或未初始化），直接退出
+    Dim enable_log
+    enable_log = Thread.GetShareVar("xb_logger_enable")
+    If enable_log = "" Or enable_log = 0 Or enable_log = "0" Then
+        Exit Sub
+    End If
+
+    Dim daemon_hb, temp_battery, temp_front, temp_locked, temp_vpn
+    
+    ' 1. 在主线程安全更新并共享各项状态指标
+    Call Thread.SetShareVar("xb_logger_main_mem", zm.GetScriptMemory())
+    
+    temp_battery = Sys.GetBatteryLevel()
+    If temp_battery = "" Then
+        temp_battery = 100
+    End If
+    Call Thread.SetShareVar("xb_logger_main_battery", temp_battery)
+    
+    temp_front = Sys.GetFront()
+    If temp_front = "" Then
+        temp_front = "unknown"
+    End If
+    Call Thread.SetShareVar("xb_logger_main_front", temp_front)
+    
+    temp_locked = Device.IsLock()
+    If temp_locked = true Or temp_locked = 1 Then
+        temp_locked = 1
+    Else
+        temp_locked = 0
+    End If
+    Call Thread.SetShareVar("xb_logger_main_locked", temp_locked)
+    
+    temp_vpn = Device.GetVPNStatus()
+    If temp_vpn = true Or temp_vpn = 1 Then
+        temp_vpn = 1
+    Else
+        temp_vpn = 0
+    End If
+    Call Thread.SetShareVar("xb_logger_main_vpn", temp_vpn)
+    
+    ' 2. 线程守护：检测子线程心跳并自动拉起守护
+    daemon_hb = Thread.GetShareVar("xb_logger_daemon_last_heartbeat")
+    If daemon_hb <> "" And daemon_hb <> 0 Then
+        If TickCount() - CLng(daemon_hb) > 30000 Then
+            TracePrint "【守护警报】检测到日志发送子线程无响应，主线程正在重新拉起守护线程..."
+            Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
+            Call Thread.Start(ThreadWorker)
+        End If
+    End If
+End Sub
 
 Function Close()
     Call Thread.SetShareVar("xb_logger_force_exit", 1)
@@ -341,23 +430,23 @@ Sub ThreadWorker()
             If now_tick - last_micro_tick >= 5000 Then
                 last_micro_tick = now_tick
                 
-                front_app = Sys.GetFront()
+                front_app = Thread.GetShareVar("xb_logger_main_front")
                 If front_app = "" Then
                     front_app = "unknown"
                 End If
                 
-                is_locked = Device.IsLock()
-                If is_locked = true Or is_locked = 1 Then
-                    is_locked = 1
-                Else
+                is_locked = Thread.GetShareVar("xb_logger_main_locked")
+                If is_locked = "" Then
                     is_locked = 0
+                Else
+                    is_locked = CInt(is_locked)
                 End If
                 
-                vpn_status = Device.GetVPNStatus()
-                If vpn_status = true Or vpn_status = 1 Then
-                    vpn_status = 1
-                Else
+                vpn_status = Thread.GetShareVar("xb_logger_main_vpn")
+                If vpn_status = "" Then
                     vpn_status = 0
+                Else
+                    vpn_status = CInt(vpn_status)
                 End If
                 
                 is_switching = Thread.GetShareVar("xb_script_is_switching_account")
@@ -379,9 +468,11 @@ Sub ThreadWorker()
             End If
             
             If need_force_ping Or (now_tick - last_ping_time >= 60000) Then
-                current_battery = Sys.GetBatteryLevel()
+                current_battery = Thread.GetShareVar("xb_logger_main_battery")
                 If current_battery = "" Then
                     current_battery = 100
+                Else
+                    current_battery = CInt(current_battery)
                 End If
                 
                 current_mem = Thread.GetShareVar("xb_logger_main_mem")
@@ -389,23 +480,23 @@ Sub ThreadWorker()
                     current_mem = 0
                 End If
                 
-                front_app = Sys.GetFront()
+                front_app = Thread.GetShareVar("xb_logger_main_front")
                 If front_app = "" Then
                     front_app = "unknown"
                 End If
                 
-                is_locked = Device.IsLock()
-                If is_locked = true Or is_locked = 1 Then
-                    is_locked = 1
-                Else
+                is_locked = Thread.GetShareVar("xb_logger_main_locked")
+                If is_locked = "" Then
                     is_locked = 0
+                Else
+                    is_locked = CInt(is_locked)
                 End If
                 
-                vpn_status = Device.GetVPNStatus()
-                If vpn_status = true Or vpn_status = 1 Then
-                    vpn_status = 1
-                Else
+                vpn_status = Thread.GetShareVar("xb_logger_main_vpn")
+                If vpn_status = "" Then
                     vpn_status = 0
+                Else
+                    vpn_status = CInt(vpn_status)
                 End If
                 
                 is_switching = Thread.GetShareVar("xb_script_is_switching_account")
