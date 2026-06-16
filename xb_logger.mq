@@ -58,7 +58,7 @@ Sub __push_log(level, module_name, content)
     ' 2. 线程守护：主线程检测子线程心跳，超时 30 秒自动拉起守护线程
     daemon_hb = Thread.GetShareVar("xb_logger_daemon_last_heartbeat")
     If daemon_hb <> "" And daemon_hb <> 0 Then
-        If TickCount() - CInt(daemon_hb) > 30000 Then
+        If TickCount() - CLng(daemon_hb) > 30000 Then
             TracePrint "【守护警报】检测到日志发送子线程无响应，主线程正在重新拉起守护线程..."
             Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
             Call Thread.Start(ThreadWorker)
@@ -115,7 +115,7 @@ Function Close()
     
     If ip <> "" And port <> "" And code <> "" And device_id <> "" Then
         TracePrint "主线程 OnScriptExit 开始连接服务器以发送优雅退出信号..."
-        sh = socket.TcpConnect(ip, CInt(port))
+        sh = socket.TcpConnect(ip, CLng(port))
         If sh <> "" And sh <> false And sh <> 0 Then
             If dev_info = "" Then
                 dev_info = "{}"
@@ -148,8 +148,11 @@ Sub ThreadWorker()
     Dim auth_status, lines_count, wait_i, wait_j
     Dim socket_handle, dev_info, send_ret, auth_lines, auth_lines_count, auth_line_i, auth_line, first_line_tbl, cmd_line_tbl
     Dim current_battery, front_app, is_locked, vpn_status, chunk_send_str
+    Dim current_battery_val, front_app_val, is_locked_val, vpn_status_val, chunk_send_str_val
+    Dim has_authed, auth_status_val, auth_err_msg, auth_cmd_val
+    Dim current_battery_hb, front_app_hb, is_locked_hb, vpn_status_hb, chunk_send_hb
     Dim last_front_app, last_is_locked, last_vpn_status, last_battery, current_mem, last_mem, is_switching, need_force_ping, last_micro_tick
-    Dim real_app_name, start_tick, run_secs, cur_task
+    Dim app_list, app_len, app_idx, real_app_name, start_tick, run_secs, cur_task, cur_account
     
     ' 声明本地 socket 句柄变量，用于无状态连接，彻底规避跨线程局部句柄变量丢失的 Bug
     socket_handle = ""
@@ -181,7 +184,7 @@ Sub ThreadWorker()
     last_battery = -1
     last_mem = 0
     last_micro_tick = TickCount()
-
+    // app_list = Sys.GetAppList()
     
     Do
         Call Thread.SetShareVar("xb_logger_daemon_last_heartbeat", TickCount())
@@ -202,7 +205,7 @@ Sub ThreadWorker()
             TracePrint "Nest TCP 正在尝试建立连接到: " & ip & ":" & port
             
             ' 调用无状态 TcpConnect 获取连接句柄
-            socket_handle = socket.TcpConnect(ip, CInt(port))
+            socket_handle = socket.TcpConnect(ip, CLng(port))
             If socket_handle <> "" And socket_handle <> false And socket_handle <> 0 Then
                 TracePrint "Nest TCP 物理连接建立成功，正在进行鉴权握手..."
                 Delay 500
@@ -252,41 +255,44 @@ Sub ThreadWorker()
                         ' 将读取到的全部数据以换行符分割，防止多个包（鉴权响应+下行指令）粘包导致 JSON 解析崩溃
                         auth_lines = Split(auth_resp, Chr(10))
                         auth_lines_count = UBound(auth_lines)
-                        first_line_tbl = ""
+                        
+                        has_authed = false
+                        auth_status_val = ""
+                        auth_err_msg = ""
                         
                         For auth_line_i = 0 To auth_lines_count
                             auth_line = auth_lines(auth_line_i)
                             If auth_line <> "" Then
-                                If first_line_tbl = "" Then
-                                    ' 第一行是非空的鉴权结果包
-                                    first_line_tbl = Cjson.Decode(auth_line)
-                                Else
-                                    ' 后面的是连带发送过来的下行指令（例如 start_log_stream）
-                                    cmd_line_tbl = Cjson.Decode(auth_line)
-                                    If cmd_line_tbl <> "" Then
-                                        cmd = cmd_line_tbl["cmd"]
-                                        If cmd = "start_log_stream" then
-                                            is_streaming = true
-                                            Call Thread.SetShareVar("xb_logger_is_streaming", 1)
-                                            TracePrint "Nest 实时指令：开启实时日志流上报"
-                                        End If
+                                ' 提取 status 字段
+                                auth_status_val = GetJsonValue(auth_line, "status")
+                                If auth_status_val <> "" Then
+                                    If auth_status_val = "ok" Then
+                                        has_authed = true
+                                    Else
+                                        auth_err_msg = GetJsonValue(auth_line, "message")
                                     End If
+                                End If
+                                
+                                ' 提取 cmd 字段
+                                auth_cmd_val = GetJsonValue(auth_line, "cmd")
+                                If auth_cmd_val = "start_log_stream" Then
+                                    is_streaming = true
+                                    Call Thread.SetShareVar("xb_logger_is_streaming", 1)
+                                    TracePrint "Nest 实时指令：开启实时日志流上报"
                                 End If
                             End If
                         Next
                         
-                        auth_tbl = first_line_tbl
-                        If auth_tbl <> "" And auth_tbl["status"] = "ok" Then
+                        If has_authed Then
                             Call Thread.SetShareVar("xb_logger_status", "authorized")
                             last_ping_time = TickCount()
                             TracePrint "Nest TCP 鉴权激活成功，开启守护循环！"
                             Call __push_log("INFO", "SYSTEM", "云控通信长连接建立成功，脚本开始运行")
                         Else
-                            errMsg = "未知原因"
-                            If auth_tbl <> "" Then
-                                errMsg = auth_tbl["message"]
+                            If auth_err_msg = "" Then
+                                auth_err_msg = "未知鉴权错误"
                             End If
-                            TracePrint "Nest TCP 鉴权失败: " & errMsg
+                            TracePrint "Nest TCP 鉴权失败: " & auth_err_msg
                             Call socket.TcpClose(socket_handle)
                             socket_handle = ""
                             Call Thread.SetShareVar("xb_logger_status", "auth_failed")
@@ -414,7 +420,7 @@ Sub ThreadWorker()
                 If start_tick = "" Then
                     run_secs = 0
                 Else
-                    run_secs = CInt((TickCount() - CLng(start_tick)) / 1000)
+                    run_secs = CLng((TickCount() - CLng(start_tick)) / 1000)
                 End If
                 
                 ' 2. 获取当前任务名并 JSON 过滤转义
@@ -424,6 +430,14 @@ Sub ThreadWorker()
                 End If
                 cur_task = Replace(cur_task, Chr(92), Chr(92) & Chr(92))
                 cur_task = Replace(cur_task, Chr(34), Chr(92) & Chr(34))
+
+                ' 2.5 获取当前账号并 JSON 过滤转义
+                cur_account = Thread.GetShareVar("xb_script_current_account")
+                If cur_account = "" Then
+                    cur_account = "未登录"
+                End If
+                cur_account = Replace(cur_account, Chr(92), Chr(92) & Chr(92))
+                cur_account = Replace(cur_account, Chr(34), Chr(92) & Chr(34))
                 
                 ' 3. 直接上报前台应用包名，翻译留给后台处理
                 real_app_name = front_app
@@ -435,6 +449,7 @@ Sub ThreadWorker()
                            Chr(34) & "battery" & Chr(34) & ":" & current_battery & "," & _
                            Chr(34) & "frontApp" & Chr(34) & ":" & Chr(34) & real_app_name & Chr(34) & "," & _
                            Chr(34) & "currentTask" & Chr(34) & ":" & Chr(34) & cur_task & Chr(34) & "," & _
+                           Chr(34) & "currentAccount" & Chr(34) & ":" & Chr(34) & cur_account & Chr(34) & "," & _
                            Chr(34) & "runningTime" & Chr(34) & ":" & run_secs & "," & _
                            Chr(34) & "isLocked" & Chr(34) & ":" & is_locked & "," & _
                            Chr(34) & "vpnStatus" & Chr(34) & ":" & vpn_status & "," & _
@@ -460,10 +475,8 @@ Sub ThreadWorker()
                     For i = 0 To lines_count
                         line = lines(i)
                         If line <> "" Then
-                            ' 读取解析后的指令，使用方括号 []
-                            cmd_tbl = Cjson.Decode(line)
-                            If cmd_tbl <> "" Then
-                                cmd = cmd_tbl["cmd"]
+                            cmd = GetJsonValue(line, "cmd")
+                            If cmd <> "" Then
                                 If cmd = "start_log_stream" then
                                     is_streaming = true
                                     Call Thread.SetShareVar("xb_logger_is_streaming", 1)
@@ -473,7 +486,7 @@ Sub ThreadWorker()
                                     Call Thread.SetShareVar("xb_logger_is_streaming", 0)
                                     TracePrint "Nest 实时指令：关闭实时流，日志写入本地归档缓存"
                                 ElseIf cmd = "force_kick" then
-                                    kickMsg = cmd_tbl["message"]
+                                    kickMsg = GetJsonValue(line, "message")
                                     If kickMsg = "" Then
                                         kickMsg = "设备已在后台解绑"
                                     End If
@@ -623,3 +636,42 @@ Sub ThreadWorker()
     Call Thread.SetShareVar("xb_logger_status", "closed")
     TracePrint "Nest TCP 守护线程已安全切断并退出。"
 End Sub
+
+Function GetJsonValue(jsonStr, key)
+    Dim searchKey, pos, startPos, endPos, val
+    searchKey = Chr(34) & key & Chr(34) & ":"
+    pos = InStr(1, jsonStr, searchKey)
+    If pos = 0 Then
+        GetJsonValue = ""
+        Exit Function
+    End If
+    
+    startPos = pos + Len(searchKey)
+    ' 过滤空白字符
+    Do While Mid(jsonStr, startPos, 1) = " " Or Mid(jsonStr, startPos, 1) = Chr(9)
+        startPos = startPos + 1
+    Loop
+    
+    ' 判断值是字符串还是数字或布尔值
+    If Mid(jsonStr, startPos, 1) = Chr(34) Then
+        ' 字符串类型
+        startPos = startPos + 1
+        endPos = InStr(startPos, jsonStr, Chr(34))
+        If endPos > 0 Then
+            GetJsonValue = Mid(jsonStr, startPos, endPos - startPos)
+        Else
+            GetJsonValue = ""
+        End If
+    Else
+        ' 数字、布尔值或 null 类型，找逗号或右花括号
+        endPos = startPos
+        Do While endPos <= Len(jsonStr)
+            val = Mid(jsonStr, endPos, 1)
+            If val = "," Or val = "}" Or val = "]" Or val = " " Then
+                Exit Do
+            End If
+            endPos = endPos + 1
+        Loop
+        GetJsonValue = Mid(jsonStr, startPos, endPos - startPos)
+    End If
+End Function
