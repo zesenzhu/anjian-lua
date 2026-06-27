@@ -108,9 +108,9 @@ Function GetDeviceDetailsJson(customName)
     is_root = 0
     battery = Sys.GetBatteryLevel()
     ip = Device.GetIP()
-    ' 防御性容错，如果获取到了 "error" 或 "null" 字符，尝试使用紫猫插件的获取局域网IP方式
+    ' 防御性容错，如果获取到了 "error" 或 "null" 字符，降级为默认值 "0.0.0.0"
     If ip = "" Or ip = "error" Or ip = "null" Or InStr(1, ip, "error") > 0 Or InStr(1, ip, "null") > 0 Then
-        ip = zm.GetIPNet()
+        ip = "0.0.0.0"
     End If
     dev_type = GetDeviceType()
     
@@ -186,3 +186,4 @@ Function GetDeviceType()
     ' 3. 兜底返回真机
     GetDeviceType = "real_device"
 End Function
+

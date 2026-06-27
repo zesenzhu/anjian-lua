@@ -61,6 +61,7 @@ Function VerifyCode(serverUrl, code)
     
     If success = true Then
         TracePrint "【授权系统】认证通过！卡密有效期至: " & CStr(resp_tbl["expireTime"])
+        
         VerifyCode = True
     Else
         TracePrint "【授权系统】认证拒绝！原因: " & msg
